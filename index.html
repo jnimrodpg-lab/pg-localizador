@@ -188,6 +188,13 @@
     .tag-row{display:flex;gap:8px;flex-wrap:wrap}
     .tag{padding:6px 9px;border-radius:999px;font-size:11px;border:1px solid var(--line);color:var(--muted);background:rgba(255,255,255,.03)}
     .empty{height:100%;display:grid;place-items:center;text-align:center;padding:20px;color:var(--muted)}
+    .scanner-modal{position:fixed;inset:0;background:rgba(0,0,0,.62);display:none;align-items:center;justify-content:center;z-index:9999;padding:20px}
+    .scanner-modal.show{display:flex}
+    .scanner-box{width:min(560px,100%);background:linear-gradient(180deg, rgba(12,24,41,.98), rgba(8,17,30,.98));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);overflow:hidden}
+    .scanner-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}
+    .scanner-body{padding:14px;display:grid;gap:12px}
+    #scannerReader{width:100%;min-height:320px;border-radius:16px;overflow:hidden;background:#000;border:1px solid var(--line)}
+    .scanner-actions{display:flex;gap:8px;justify-content:flex-end}
 
     @media (max-width: 1460px){.app{grid-template-columns:var(--sidebar-w) 360px 1fr 320px}}
     @media (max-width: 1280px){body{overflow:auto}.app,.app.sidebar-collapsed{height:auto;min-height:100vh;grid-template-columns:1fr;grid-template-rows:auto auto minmax(480px,60vh) minmax(320px,48vh)}.app.sidebar-collapsed .brand-text,.app.sidebar-collapsed .menu-title span,.app.sidebar-collapsed .menu-item span,.app.sidebar-collapsed .sidebar-foot,.app.sidebar-collapsed .menu-items{display:initial}.app.sidebar-collapsed .menu-title,.app.sidebar-collapsed .menu-item{justify-content:flex-start;padding-inline:12px}}
@@ -286,6 +293,25 @@
     </section>
   </div>
 
+  <div class="scanner-modal" id="scannerModal">
+    <div class="scanner-box">
+      <div class="scanner-head">
+        <div>
+          <b>Escanear código</b>
+          <div class="muted tiny" id="scannerHint">Activa tu cámara y apunta al QR o código de barras.</div>
+        </div>
+        <button class="btn secondary" id="btnCloseScanner" type="button">Cerrar</button>
+      </div>
+      <div class="scanner-body">
+        <div id="scannerReader"></div>
+        <div class="scanner-actions">
+          <button class="btn secondary" id="btnStopScanner" type="button">Detener</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="https://unpkg.com/html5-qrcode"></script>
 <script>
 (() => {
   const $ = (s,el=document)=>el.querySelector(s);
@@ -297,6 +323,10 @@
   const btnSearch = $('#btnSearch');
   const btnScanQR = $('#btnScanQR');
   const btnScanBar = $('#btnScanBar');
+  const scannerModal = $('#scannerModal');
+  const btnCloseScanner = $('#btnCloseScanner');
+  const btnStopScanner = $('#btnStopScanner');
+  const scannerHint = $('#scannerHint');
   const productList = $('#productList');
   const countProducts = $('#countProducts');
   const productSummary = $('#productSummary');
@@ -342,6 +372,9 @@
       { id:'compact_3', name:'Rack compacto 3 niveles', levels:3, slots:2, width:132, depth:76, height:200, style:'compact' }
     ]
   };
+
+  let html5QrScanner = null;
+  let scannerRunning = false;
 
   const DEFAULT_ZONES = [
     { id:'Z1', name:'Zona Z1', color:'#ffd84d', pts:[{x:60,y:60},{x:300,y:60},{x:300,y:210},{x:60,y:210}] },
@@ -465,7 +498,7 @@
   function filterProducts(){
     const q = norm(searchInput.value);
     if(!q){ appState.filtered = appState.products; renderProducts(appState.filtered); return; }
-    appState.filtered = appState.products.filter(p => norm([p.sku,p.nombre,p.variante,p.ubicacion,p.almacen,p.rack,p.rackStore].join(' ')).includes(q));
+    appState.filtered = appState.products.filter(p => norm([p.sku,p.barras,p.nombre,p.variante,p.ubicacion,p.almacen,p.rack,p.rackStore].join(' ')).includes(q));
     renderProducts(appState.filtered);
   }
 
@@ -513,27 +546,83 @@
       const text = await fetch(endpoint).then(r => r.text());
       const json = JSON.parse(text.substring(47).slice(0, -2));
       const rows = json.table.rows || [];
-      const cols = (json.table.cols || []).map(c => norm(c.label || c.id || ''));
-      const idx = name => cols.findIndex(c => c === norm(name));
-      const iSKU = idx('sku') >= 0 ? idx('sku') : 0;
-      const iNombre = idx('nombre') >= 0 ? idx('nombre') : 1;
-      const iVar = idx('variante') >= 0 ? idx('variante') : 2;
-      const iUb = idx('ubicacion') >= 0 ? idx('ubicacion') : 3;
-      const iAlm = idx('almacen') >= 0 ? idx('almacen') : 4;
-      const parse = v => v?.v ?? '';
-      const parsed = rows.map(r => ({
-        sku: String(parse(r.c?.[iSKU]) || ''),
-        nombre: String(parse(r.c?.[iNombre]) || ''),
-        variante: String(parse(r.c?.[iVar]) || ''),
-        ubicacion: String(parse(r.c?.[iUb]) || ''),
-        almacen: String(parse(r.c?.[iAlm]) || '')
-      })).filter(x => x.sku || x.nombre).map((x, i) => {
-        const rack = (x.ubicacion.match(/^([A-Z0-9-]+)-N/i) || [,'Z1-E1'])[1];
-        const rackStore = (x.almacen.match(/^([A-Z0-9-]+)-N/i) || [,'ALM1-E1'])[1];
-        const lvl = parseInt((x.ubicacion.match(/-N(\d+)/i)||[])[1] || '1',10);
-        const slot = parseInt((x.ubicacion.match(/-S(\d+)/i)||[])[1] || '1',10);
-        return { ...x, rack, rackStore, zona:rack.split('-')[0], nivel:lvl, slot };
-      });
+      const headers = (json.table.cols || []).map((c, idx) => ({
+        raw: String(c.label || c.id || '').trim(),
+        key: norm(c.label || c.id || ''),
+        idx
+      }));
+
+      const findFirst = (...names) => {
+        for (const n of names){
+          const hit = headers.find(h => h.key === norm(n));
+          if (hit) return hit.idx;
+        }
+        return -1;
+      };
+      const findAll = (...names) => headers.filter(h => names.some(n => h.key === norm(n))).map(h => h.idx);
+      const val = (row, i) => String(row?.c?.[i]?.v ?? '').trim();
+
+      const iSKU = findFirst('sku','cod / modelo','codigo','código');
+      const iNombre = findFirst('nombre');
+      const iVar = findFirst('variante');
+      const iBarras = findFirst('barras','barra');
+      const iUb = findFirst('ubicacion','ubicación');
+      const iAlm = findFirst('almacen','almacén');
+
+      const zonas = findAll('zona');
+      const estantes = findAll('estante');
+      const niveles = findAll('nivel');
+      const slots = findAll('slot');
+      const mainZona = zonas[0] ?? -1, storeZona = zonas[1] ?? -1;
+      const mainEst = estantes[0] ?? -1, storeEst = estantes[1] ?? -1;
+      const mainNiv = niveles[0] ?? -1, storeNiv = niveles[1] ?? -1;
+      const mainSlot = slots[0] ?? -1, storeSlot = slots[1] ?? -1;
+
+      const buildLocation = (z,e,n,s) => {
+        const parts = [z,e,n,s].map(x => String(x || '').trim()).filter(Boolean);
+        if (!parts.length) return '';
+        if (parts.length >= 4) return `${parts[0]}-${parts[1]}-${parts[2]}-${parts[3]}`;
+        return parts.join('-');
+      };
+      const parseLoc = (txt, fallbackRack='Z1-E1') => {
+        const raw = String(txt || '').trim().toUpperCase();
+        const rack = (raw.match(/^([A-Z0-9]+-E\d+)/i) || [,''])[1] || fallbackRack;
+        const nivel = parseInt((raw.match(/-N(\d+)/i)||[])[1] || '1', 10);
+        const slot = parseInt((raw.match(/-(?:S|P)(\d+)/i)||[])[1] || '1', 10);
+        return { rack, zona: rack.split('-')[0], nivel, slot };
+      };
+
+      const parsed = rows.map((r, rowIndex) => {
+        const sku = iSKU >= 0 ? val(r, iSKU) : '';
+        const nombre = iNombre >= 0 ? val(r, iNombre) : '';
+        const variante = iVar >= 0 ? val(r, iVar) : '';
+        const barras = iBarras >= 0 ? val(r, iBarras) : '';
+
+        let ubicacion = iUb >= 0 ? val(r, iUb) : '';
+        let almacen = iAlm >= 0 ? val(r, iAlm) : '';
+
+        if (!ubicacion) ubicacion = buildLocation(val(r, mainZona), val(r, mainEst), val(r, mainNiv), val(r, mainSlot));
+        if (!almacen) almacen = buildLocation(val(r, storeZona), val(r, storeEst), val(r, storeNiv), val(r, storeSlot));
+
+        const main = parseLoc(ubicacion, 'Z1-E1');
+        const store = parseLoc(almacen, 'ALM1-E1');
+
+        return {
+          sku,
+          barras,
+          nombre,
+          variante,
+          ubicacion,
+          almacen,
+          rack: main.rack,
+          rackStore: store.rack,
+          zona: main.zona,
+          nivel: main.nivel,
+          slot: main.slot,
+          _rowIndex: rowIndex
+        };
+      }).filter(x => x.sku || x.nombre || x.barras);
+
       if(parsed.length){
         appState.products = parsed;
         appState.filtered = parsed;
@@ -576,7 +665,7 @@
           <button class="btn secondary" id="btnUseDemo">Usar dataset demo</button>
         </div>
         <div class="kv">
-          <div class="kv-row"><b>Columnas sugeridas</b><span>SKU, Nombre, Variante, Ubicación, Almacén</span></div>
+          <div class="kv-row"><b>Columnas sugeridas</b><span>Barras, Sku, Nombre, Variante, Ubicación / Almacen o Zona-Estante-Nivel-Slot</span></div>
           <div class="kv-row"><b>Compatibilidad</b><span>optimizado para más de 7 mil productos</span></div>
           <div class="kv-row"><b>Render lista</b><span>muestra por bloques para no volverla un dinosaurio</span></div>
         </div>
@@ -1059,6 +1148,54 @@
     contentStatus.textContent = 'Vista rápida de reportes.';
   }
 
+  async function stopScanner(){
+    try{
+      if (html5QrScanner && scannerRunning) await html5QrScanner.stop();
+    } catch (e) { console.warn(e); }
+    scannerRunning = false;
+    if (html5QrScanner){
+      try { await html5QrScanner.clear(); } catch(e){}
+      html5QrScanner = null;
+    }
+    scannerModal.classList.remove('show');
+  }
+
+  async function openScanner(mode='qr'){
+    scannerHint.textContent = mode === 'bar' ? 'Apunta al código de barras con buena luz y distancia.' : 'Apunta al QR o código de barras.';
+    scannerModal.classList.add('show');
+    if (!window.Html5Qrcode) {
+      alert('No se pudo cargar la librería del escáner. Revisa tu conexión.');
+      return;
+    }
+    if (html5QrScanner){ await stopScanner(); scannerModal.classList.add('show'); }
+    html5QrScanner = new Html5Qrcode('scannerReader');
+    const formats = mode === 'bar'
+      ? [ Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.ITF ]
+      : [ Html5QrcodeSupportedFormats.QR_CODE, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E ];
+    try{
+      const cameras = await Html5Qrcode.getCameras();
+      const cameraId = (cameras.find(c => /back|rear|trasera/i.test(c.label || '')) || cameras[0] || {}).id;
+      if (!cameraId) throw new Error('No se detectó cámara.');
+      await html5QrScanner.start(
+        cameraId,
+        { fps: 12, qrbox: { width: 260, height: 180 }, formatsToSupport: formats, aspectRatio: 1.777 },
+        (decodedText) => {
+          searchInput.value = decodedText;
+          filterProducts();
+          const exact = appState.products.find(p => [p.sku,p.barras,p.rack,p.ubicacion].some(v => String(v||'').toLowerCase() === String(decodedText).toLowerCase()));
+          if (exact) selectProduct(exact);
+          stopScanner();
+        },
+        () => {}
+      );
+      scannerRunning = true;
+    } catch(err){
+      console.error(err);
+      alert('No se pudo iniciar el escáner. Asegúrate de estar en localhost o https y de dar permiso a la cámara.');
+      stopScanner();
+    }
+  }
+
   function renderCurrentScreen(){
     if(appState.screen === 'sheet') renderSheetScreen();
     else if(appState.screen === 'layout') renderLayoutEditor();
@@ -1074,8 +1211,11 @@
   menuItems.forEach(item => item.addEventListener('click', () => setScreen(item.dataset.screen)));
   btnSearch.addEventListener('click', filterProducts);
   searchInput.addEventListener('input', debounce(filterProducts, 120));
-  btnScanQR.addEventListener('click', () => { const p = appState.products[(Math.random()*appState.products.length)|0]; searchInput.value = p.sku; filterProducts(); selectProduct(p); });
-  btnScanBar.addEventListener('click', () => { const p = appState.products[(Math.random()*appState.products.length)|0]; searchInput.value = p.rack; filterProducts(); selectProduct(p); });
+  btnScanQR.addEventListener('click', () => openScanner('qr'));
+  btnScanBar.addEventListener('click', () => openScanner('bar'));
+  btnCloseScanner.addEventListener('click', stopScanner);
+  btnStopScanner.addEventListener('click', stopScanner);
+  scannerModal.addEventListener('click', (e) => { if (e.target === scannerModal) stopScanner(); });
 
   seedState();
   renderProducts(appState.filtered);
