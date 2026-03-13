@@ -177,6 +177,8 @@
     /* ORTHO EDITOR */
     .editor-toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
     .editor-toolbar .seg-btn.active{background:linear-gradient(180deg,#174a82,#0b6fcb)}
+    .editor-spacer{flex:1 1 auto}
+    .zoom-chip{padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.03);font-size:12px;color:var(--muted);min-width:74px;text-align:center}
     .ortho-zone{fill:rgba(54,163,255,.10);stroke:rgba(54,163,255,.8);stroke-width:2;cursor:grab}
     .ortho-zone.selected{fill:rgba(255,216,77,.14);stroke:rgba(255,216,77,.9)}
     .ortho-rack{fill:rgba(255,255,255,.08);stroke:#9db8d4;stroke-width:2;cursor:grab;transform-box:fill-box;transform-origin:center}
@@ -209,6 +211,8 @@
     .ortho-dim-text{fill:#ffe17f;font-size:11px;font-weight:800;font-family:var(--mono)}
     .edge-hit{stroke:rgba(255,255,255,0);stroke-width:18;cursor:move}
     .edge-guide{stroke:rgba(255,216,77,.9);stroke-width:3.2;stroke-dasharray:8 5}
+    .edge-handle{fill:#0d1d32;stroke:#ffd84d;stroke-width:2;cursor:ew-resize}
+    .edge-handle.active{fill:#ffd84d;stroke:#fff2b3}
 
   </style>
 </head>
@@ -376,7 +380,8 @@
     editor: {
       mode: 'select',
       dragging: null,
-      offset: {x:0,y:0}
+      offset: {x:0,y:0},
+      viewBox: { x:0, y:0, w:900, h:620 }
     },
     models: [
       { id:'std_4', name:'Rack estándar 4 niveles', levels:4, slots:2, width:150, depth:82, height:238, style:'standard' },
@@ -547,6 +552,39 @@
       .filter(Boolean);
     const next = Math.max(2, ...nums) + 1;
     return 'Z' + next;
+  }
+
+  function normalizeZoneCode(code){
+    return String(code || '').trim().toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
+  }
+  function renameZoneId(oldId, nextId){
+    const current = normalizeZoneCode(oldId);
+    const target = normalizeZoneCode(nextId);
+    if(!current || !target || current === target) return current || target;
+    if(appState.layout.zones.some(z => z.id === target && z.id !== current)){
+      alert('La nomenclatura de zona ya existe.');
+      return current;
+    }
+    const zone = findZoneById(current);
+    if(!zone) return current;
+    zone.id = target;
+    appState.layout.racks.filter(r => r.zoneId === current).forEach(r => {
+      r.zoneId = target;
+      const suffix = (String(r.id).match(/-E\d+$/i) || ['-E1'])[0];
+      r.id = `${target}${suffix}`;
+    });
+    if(appState.selectedZoneId === current) appState.selectedZoneId = target;
+    if(appState.selectedEdge.zoneId === current) appState.selectedEdge.zoneId = target;
+    if(appState.selectedVertex.zoneId === current) appState.selectedVertex.zoneId = target;
+    if(appState.editor.dragging?.zoneId === current) appState.editor.dragging.zoneId = target;
+    if(appState.selectedRackLayoutId){
+      const found = appState.layout.racks.find(r => r.id === appState.selectedRackLayoutId);
+      if(!found){
+        const zoneRack = appState.layout.racks.find(r => r.zoneId === target);
+        appState.selectedRackLayoutId = zoneRack?.id || '';
+      }
+    }
+    return target;
   }
 
   const GRID_SIZE = 20;
@@ -964,6 +1002,12 @@
       root.appendChild(path);
       const c = centroid(z.pts); const ci = toIso(c.x,c.y,0);
       const label = svgEl('text',{x:ci.x,y:ci.y,class:'zone-label','text-anchor':'middle'}); label.textContent = z.id; root.appendChild(label);
+      if(z.name && z.name.toUpperCase() !== z.id.toUpperCase()){
+        const sub = svgEl('text',{x:ci.x,y:ci.y + 22,class:'ortho-label','text-anchor':'middle'}); sub.textContent = z.name; root.appendChild(sub);
+      }
+      if(z.name && z.name.toUpperCase() !== z.id.toUpperCase()){
+        const sub = svgEl('text',{x:ci.x,y:ci.y + 22,class:'ortho-label','text-anchor':'middle'}); sub.textContent = z.name; root.appendChild(sub);
+      }
     });
 
     const racks = appState.layout.racks.slice().sort((a,b)=>(a.x+a.y)-(b.x+b.y));
@@ -1105,8 +1149,13 @@
           <button class="seg-btn" id="btnAddVertex">Insertar vértice</button>
           <button class="seg-btn" id="btnRotateRack">Rotar rack 90°</button>
           <button class="seg-btn" id="btnDeleteSelected">Eliminar selección</button>
+          <div class="editor-spacer"></div>
+          <button class="seg-btn" id="btnZoomOut">−</button>
+          <div class="zoom-chip" id="zoomLabel">100%</div>
+          <button class="seg-btn" id="btnZoomIn">+</button>
+          <button class="seg-btn" id="btnZoomFit">Ajustar</button>
         </div>
-        <svg id="layoutSvg" viewBox="0 0 900 620"></svg>
+        <svg id="layoutSvg"></svg>
       </div>`;
     detailWrap.innerHTML = `<div class="stage" style="padding:14px;overflow:auto"><div id="layoutInspector"></div></div>`;
 
@@ -1114,13 +1163,16 @@
     renderLayoutSvg(svg);
     renderLayoutInspector();
     bindLayoutToolbar();
+    const zl = $('#zoomLabel'); if(zl){ const vb = appState.editor.viewBox || {w:900}; zl.textContent = `${Math.round((900 / vb.w) * 100)}%`; }
   }
 
   function renderLayoutSvg(svg){
     svg.innerHTML = '';
+    const vb = appState.editor.viewBox || { x:0, y:0, w:900, h:620 };
+    svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     const grid = svgEl('g',{class:'ortho-grid'});
-    for(let x=0;x<=900;x+=40) grid.appendChild(svgEl('line',{x1:x,y1:0,x2:x,y2:620}));
-    for(let y=0;y<=620;y+=40) grid.appendChild(svgEl('line',{x1:0,y1:y,x2:900,y2:y}));
+    for(let x=-800;x<=1700;x+=40) grid.appendChild(svgEl('line',{x1:x,y1:-800,x2:x,y2:1600}));
+    for(let y=-800;y<=1600;y+=40) grid.appendChild(svgEl('line',{x1:-800,y1:y,x2:1700,y2:y}));
     svg.appendChild(grid);
 
     const edgeLayer = svgEl('g');
@@ -1154,10 +1206,14 @@
           const nx = (q.y-p.y) / (len || 1);
           const ny = -(q.x-p.x) / (len || 1);
           const ox = nx * 16, oy = ny * 16;
-          edgeLayer.appendChild(svgEl('line',{x1:p.x,y1:p.y,x2:q.x,y2:q.y,class: (appState.selectedEdge.zoneId===zone.id && appState.selectedEdge.a===idx) ? 'edge-guide' : 'ortho-dim'}));
+          const activeEdge = (appState.selectedEdge.zoneId===zone.id && appState.selectedEdge.a===idx);
+          edgeLayer.appendChild(svgEl('line',{x1:p.x,y1:p.y,x2:q.x,y2:q.y,class: activeEdge ? 'edge-guide' : 'ortho-dim'}));
           const txt = svgEl('text',{x:mx+ox,y:my+oy,class:'ortho-dim-text','text-anchor':'middle'});
           txt.textContent = `${Math.round(len)}`;
           edgeLayer.appendChild(txt);
+          const handle = svgEl('rect',{x:mx-6,y:my-6,width:12,height:12,rx:3,class:'edge-handle' + (activeEdge ? ' active' : ''),transform:`rotate(45 ${mx} ${my})`});
+          handle.addEventListener('pointerdown', e => startEdgeDrag(e, zone.id, idx, (idx+1)%zone.pts.length));
+          edgeLayer.appendChild(handle);
         });
         if(appState.selectedEdge.zoneId===zone.id && appState.selectedEdge.a>=0){
           const a = zone.pts[appState.selectedEdge.a], b = zone.pts[appState.selectedEdge.b];
@@ -1181,6 +1237,20 @@
 
   function hexToRgba(hex, a){ const h = hex.replace('#',''); const r=parseInt(h.slice(0,2),16), g=parseInt(h.slice(2,4),16), b=parseInt(h.slice(4,6),16); return `rgba(${r},${g},${b},${a})`; }
   function svgPoint(evt, svg){ const pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); }
+function zoomLayout(factor, center){
+    const vb = appState.editor.viewBox || { x:0, y:0, w:900, h:620 };
+    const cx = center ? center.x : vb.x + vb.w/2;
+    const cy = center ? center.y : vb.y + vb.h/2;
+    const nw = Math.max(220, Math.min(2400, vb.w * factor));
+    const nh = Math.max(160, Math.min(1800, vb.h * factor));
+    appState.editor.viewBox = {
+      x: cx - ((cx - vb.x) / vb.w) * nw,
+      y: cy - ((cy - vb.y) / vb.h) * nh,
+      w: nw,
+      h: nh
+    };
+    renderLayoutEditor();
+  }
 
   function bindLayoutToolbar(){
     $$('.seg-btn[data-emode]').forEach(btn => btn.onclick = () => { appState.editor.mode = btn.dataset.emode; renderLayoutEditor(); });
@@ -1195,6 +1265,11 @@
       else if(zid && appState.layout.zones.length > 1){ appState.layout.zones = appState.layout.zones.filter(z => z.id !== zid); appState.layout.racks = appState.layout.racks.filter(r => r.zoneId !== zid); appState.selectedZoneId = appState.layout.zones[0]?.id || ''; }
       renderLayoutEditor();
     };
+    $('#btnZoomIn').onclick = () => zoomLayout(0.86);
+    $('#btnZoomOut').onclick = () => zoomLayout(1.16);
+    $('#btnZoomFit').onclick = () => { appState.editor.viewBox = { x:0, y:0, w:900, h:620 }; renderLayoutEditor(); };
+    const svg = $('#layoutSvg');
+    svg.onwheel = e => { e.preventDefault(); zoomLayout(e.deltaY > 0 ? 1.12 : 0.88, svgPoint(e, svg)); };
   }
 
   function handleLayoutCanvasDown(e){
@@ -1320,8 +1395,10 @@
       </div>
       <div style="height:12px"></div>
       ${zone ? `<div class="grid">
-        <label class="tiny muted">Nombre zona</label>
+        <label class="tiny muted">Nombre visible de la zona</label>
         <input id="insZoneName" value="${zone.name}" />
+        <label class="tiny muted">Nomenclatura / código de zona</label>
+        <input id="insZoneCode" value="${zone.id}" placeholder="Ej: Z1, Z2, ALM, A" />
         <div class="two">
           <div><label class="tiny muted">Color</label><input id="insZoneColor" type="color" value="${zone.color}" style="height:44px;padding:6px"></div>
           <div><label class="tiny muted">Vértices</label><div class="chip">${zone.pts.length}</div></div>
@@ -1338,12 +1415,26 @@
         </div>
       </div>` : ''}`;
     if($('#insZoneName')) $('#insZoneName').oninput = e => { zone.name = e.target.value; renderLayoutEditor(); };
+    if($('#insZoneCode')) {
+      $('#insZoneCode').onchange = e => {
+        const previous = zone.id;
+        const updated = renameZoneId(previous, e.target.value);
+        e.target.value = updated;
+        renderLayoutEditor();
+      };
+      $('#insZoneCode').onblur = e => {
+        const previous = zone.id;
+        const updated = renameZoneId(previous, e.target.value);
+        e.target.value = updated;
+        renderLayoutEditor();
+      };
+    }
     if($('#insZoneColor')) $('#insZoneColor').oninput = e => { zone.color = e.target.value; renderLayoutEditor(); };
     if($('#insRackModel')) $('#insRackModel').onchange = e => { rack.modelId = e.target.value; syncRackFootprint(rack, true); renderLayoutEditor(); };
     if($('#insRackX')) $('#insRackX').oninput = e => { rack.x = snapGrid(+e.target.value || 0); renderLayoutEditor(); };
     if($('#insRackY')) $('#insRackY').oninput = e => { rack.y = snapGrid(+e.target.value || 0); renderLayoutEditor(); };
     if($('#insRackRot')) $('#insRackRot').oninput = e => { rack.rot = ((+e.target.value || 0) % 360 + 360) % 360; syncRackFootprint(rack, true); renderLayoutEditor(); };
-    contentStatus.textContent = zone ? `Editando ${zone.id}` : 'Selecciona zona o rack';
+    contentStatus.textContent = zone ? `Editando ${zone.id}${zone.name ? ' • ' + zone.name : ''}` : 'Selecciona zona o rack';
     contentFootRight.textContent = `${appState.layout.zones.length} zonas • ${appState.layout.racks.length} racks`;
     detailStatus.textContent = rack ? `${rack.id} • ${rack.zoneId}` : (zone ? zone.id : '—');
     detailChip.textContent = rack ? rackModel(rack.modelId).name : 'layout';
