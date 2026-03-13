@@ -542,44 +542,87 @@
     sheetStatusChip.textContent = 'Cargando sheet...';
     contentStatus.textContent = 'Intentando leer Google Sheet...';
     try {
-      const endpoint = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
+      const endpoint = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:json&headers=0&sheet=${encodeURIComponent(sheetName)}`;
       const text = await fetch(endpoint).then(r => r.text());
       const json = JSON.parse(text.substring(47).slice(0, -2));
       const rows = json.table.rows || [];
-      const headers = (json.table.cols || []).map((c, idx) => ({
-        raw: String(c.label || c.id || '').trim(),
-        key: norm(c.label || c.id || ''),
-        idx
-      }));
+      const rowValues = rows.map(r => (r.c || []).map(c => String(c?.v ?? '').trim()));
+      const normCell = v => norm(String(v || ''));
+      const expected = ['sku','nombre','variante','barras','ubicacion','ubicación','almacen','almacén','zona','estante','nivel','slot'];
 
-      const findFirst = (...names) => {
+      const scoreHeaderRow = (vals) => {
+        const set = new Set(vals.map(normCell).filter(Boolean));
+        let score = 0;
+        expected.forEach(k => { if (set.has(norm(k))) score += 2; });
+        if (set.has('sku')) score += 3;
+        if (set.has('nombre')) score += 3;
+        if (set.has('variante')) score += 2;
+        if (set.has('barras')) score += 2;
+        return score;
+      };
+
+      let headerRowIndex = 0;
+      let bestScore = -1;
+      for (let i = 0; i < Math.min(10, rowValues.length); i++){
+        const score = scoreHeaderRow(rowValues[i]);
+        if (score > bestScore){
+          bestScore = score;
+          headerRowIndex = i;
+        }
+      }
+
+      const headerVals = rowValues[headerRowIndex] || [];
+      const headers = headerVals.map((raw, idx) => ({ raw, key: normCell(raw), idx }));
+      const duplicates = (name) => headers.filter(h => h.key === norm(name)).map(h => h.idx);
+      const firstOf = (...names) => {
         for (const n of names){
           const hit = headers.find(h => h.key === norm(n));
           if (hit) return hit.idx;
         }
         return -1;
       };
-      const findAll = (...names) => headers.filter(h => names.some(n => h.key === norm(n))).map(h => h.idx);
-      const val = (row, i) => String(row?.c?.[i]?.v ?? '').trim();
+      const val = (vals, i) => String(vals?.[i] ?? '').trim();
 
-      const iSKU = findFirst('sku','cod / modelo','codigo','código');
-      const iNombre = findFirst('nombre');
-      const iVar = findFirst('variante');
-      const iBarras = findFirst('barras','barra');
-      const iUb = findFirst('ubicacion','ubicación');
-      const iAlm = findFirst('almacen','almacén');
+      // fallback fijo por letras: J barras, K sku, L nombre, M variante, Q ubicacion, V almacen
+      const fallback = {
+        barras: 9,
+        sku: 10,
+        nombre: 11,
+        variante: 12,
+        ubicacion: 16,
+        almacen: 21,
+        zona1: 13,
+        estante1: 14,
+        nivel1: 15,
+        slot1: 16,
+        zona2: 17,
+        estante2: 18,
+        nivel2: 19,
+        slot2: 20
+      };
 
-      const zonas = findAll('zona');
-      const estantes = findAll('estante');
-      const niveles = findAll('nivel');
-      const slots = findAll('slot');
-      const mainZona = zonas[0] ?? -1, storeZona = zonas[1] ?? -1;
-      const mainEst = estantes[0] ?? -1, storeEst = estantes[1] ?? -1;
-      const mainNiv = niveles[0] ?? -1, storeNiv = niveles[1] ?? -1;
-      const mainSlot = slots[0] ?? -1, storeSlot = slots[1] ?? -1;
+      const iSKU = firstOf('sku') >= 0 ? firstOf('sku') : fallback.sku;
+      const iNombre = firstOf('nombre') >= 0 ? firstOf('nombre') : fallback.nombre;
+      const iVar = firstOf('variante') >= 0 ? firstOf('variante') : fallback.variante;
+      const iBarras = firstOf('barras','barra') >= 0 ? firstOf('barras','barra') : fallback.barras;
+      const iUb = firstOf('ubicacion','ubicación') >= 0 ? firstOf('ubicacion','ubicación') : fallback.ubicacion;
+      const iAlm = firstOf('almacen','almacén') >= 0 ? firstOf('almacen','almacén') : fallback.almacen;
+
+      const zonas = duplicates('zona');
+      const estantes = duplicates('estante');
+      const niveles = duplicates('nivel');
+      const slots = duplicates('slot');
+      const mainZona = zonas[0] ?? fallback.zona1, storeZona = zonas[1] ?? fallback.zona2;
+      const mainEst = estantes[0] ?? fallback.estante1, storeEst = estantes[1] ?? fallback.estante2;
+      const mainNiv = niveles[0] ?? fallback.nivel1, storeNiv = niveles[1] ?? fallback.nivel2;
+      const mainSlot = slots[0] ?? fallback.slot1, storeSlot = slots[1] ?? fallback.slot2;
 
       const buildLocation = (z,e,n,s) => {
-        const parts = [z,e,n,s].map(x => String(x || '').trim()).filter(Boolean);
+        const zz = String(z || '').trim().toUpperCase();
+        const ee = String(e || '').trim().toUpperCase();
+        const nn = String(n || '').trim().toUpperCase();
+        const ss = String(s || '').trim().toUpperCase();
+        const parts = [zz, ee, nn, ss].filter(Boolean);
         if (!parts.length) return '';
         if (parts.length >= 4) return `${parts[0]}-${parts[1]}-${parts[2]}-${parts[3]}`;
         return parts.join('-');
@@ -592,17 +635,18 @@
         return { rack, zona: rack.split('-')[0], nivel, slot };
       };
 
-      const parsed = rows.map((r, rowIndex) => {
-        const sku = iSKU >= 0 ? val(r, iSKU) : '';
-        const nombre = iNombre >= 0 ? val(r, iNombre) : '';
-        const variante = iVar >= 0 ? val(r, iVar) : '';
-        const barras = iBarras >= 0 ? val(r, iBarras) : '';
+      const dataRows = rowValues.slice(headerRowIndex + 1);
+      const parsed = dataRows.map((vals, dataIndex) => {
+        const sku = val(vals, iSKU);
+        const nombre = val(vals, iNombre);
+        const variante = val(vals, iVar);
+        const barras = val(vals, iBarras);
 
-        let ubicacion = iUb >= 0 ? val(r, iUb) : '';
-        let almacen = iAlm >= 0 ? val(r, iAlm) : '';
+        let ubicacion = val(vals, iUb);
+        let almacen = val(vals, iAlm);
 
-        if (!ubicacion) ubicacion = buildLocation(val(r, mainZona), val(r, mainEst), val(r, mainNiv), val(r, mainSlot));
-        if (!almacen) almacen = buildLocation(val(r, storeZona), val(r, storeEst), val(r, storeNiv), val(r, storeSlot));
+        if (!ubicacion) ubicacion = buildLocation(val(vals, mainZona), val(vals, mainEst), val(vals, mainNiv), val(vals, mainSlot));
+        if (!almacen) almacen = buildLocation(val(vals, storeZona), val(vals, storeEst), val(vals, storeNiv), val(vals, storeSlot));
 
         const main = parseLoc(ubicacion, 'Z1-E1');
         const store = parseLoc(almacen, 'ALM1-E1');
@@ -619,7 +663,7 @@
           zona: main.zona,
           nivel: main.nivel,
           slot: main.slot,
-          _rowIndex: rowIndex
+          _rowIndex: headerRowIndex + 1 + dataIndex
         };
       }).filter(x => x.sku || x.nombre || x.barras);
 
@@ -627,7 +671,7 @@
         appState.products = parsed;
         appState.filtered = parsed;
         sheetStatusChip.textContent = `${parsed.length.toLocaleString('es-PE')} filas`;
-        contentStatus.textContent = 'Sheet vinculado correctamente.';
+        contentStatus.textContent = `Sheet vinculado correctamente. Encabezados detectados en fila ${headerRowIndex + 1}.`;
         appState.sheetConfig.lastMode = 'google';
         selectProduct(parsed[0]);
         renderProducts(parsed);
