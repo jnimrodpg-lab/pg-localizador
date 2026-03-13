@@ -143,7 +143,9 @@
     .stage,.detail-stage{width:100%;height:100%;overflow:hidden;position:relative;border-radius:18px;border:1px solid var(--line);background:radial-gradient(circle at 50% 10%, rgba(54,163,255,.12), transparent 35%),linear-gradient(180deg, rgba(14,29,49,.98), rgba(8,17,30,.98))}
     svg{width:100%;height:100%;display:block}
     .content-foot,.detail-foot{padding:12px 14px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center;color:var(--muted);font-size:12px}
-    .dual-rack-wrap{display:grid;grid-template-rows:1fr 1fr;gap:10px;height:100%;min-height:0}
+    .dual-rack-wrap{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:100%;min-height:0}
+    .loc-full{display:block;margin-top:6px;font-family:var(--mono);font-size:11px;color:#b9d0ea;word-break:break-all}
+    @media (max-width: 1320px){.dual-rack-wrap{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
     .dual-rack-card{display:grid;grid-template-rows:auto 1fr;min-height:0;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015))}
     .dual-rack-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
     .dual-rack-svg{min-height:0}
@@ -460,6 +462,7 @@
   function seedState(){
     appState.layout.zones = clone(DEFAULT_ZONES);
     appState.layout.racks = clone(DEFAULT_RACKS);
+    appState.layout.racks.forEach(r => syncRackFootprint(r, false));
     appState.products = makeDemoProducts();
     appState.filtered = appState.products.slice(0, 400);
     appState.selectedProduct = appState.products[0];
@@ -538,6 +541,28 @@
       .filter(Boolean);
     const next = Math.max(2, ...nums) + 1;
     return 'Z' + next;
+  }
+
+  const GRID_SIZE = 20;
+  function snapGrid(n){ return Math.round(n / GRID_SIZE) * GRID_SIZE; }
+  function getRackFootprint(modelId, rot = 0){
+    const m = rackModel(modelId);
+    let w = Math.max(40, Math.round((m.width || 150) * 0.34));
+    let h = Math.max(84, Math.round((m.depth || 82) * 1.08));
+    const r = ((rot % 360) + 360) % 360;
+    if(r === 90 || r === 270) [w, h] = [h, w];
+    return { w, h };
+  }
+  function syncRackFootprint(rack, preserveCenter = true){
+    if(!rack) return;
+    const oldW = rack.w || 48, oldH = rack.h || 90;
+    const cx = rack.x + oldW / 2, cy = rack.y + oldH / 2;
+    const fp = getRackFootprint(rack.modelId, rack.rot || 0);
+    rack.w = fp.w; rack.h = fp.h;
+    if(preserveCenter){
+      rack.x = snapGrid(cx - rack.w / 2);
+      rack.y = snapGrid(cy - rack.h / 2);
+    }
   }
 
   async function loadSheetFromConfig(){
@@ -851,6 +876,7 @@
             <div>
               <b>Rack de ubicación</b>
               <div class="muted tiny">Ubicación principal del producto</div>
+              <span class="loc-full" id="rackPrimaryLoc">—</span>
             </div>
             <span class="chip" id="rackPrimaryChip">—</span>
           </div>
@@ -861,6 +887,7 @@
             <div>
               <b>Rack de almacén</b>
               <div class="muted tiny">Ubicación de respaldo / almacén</div>
+              <span class="loc-full" id="rackStoreLoc">—</span>
             </div>
             <span class="chip" id="rackStoreChip">—</span>
           </div>
@@ -895,10 +922,12 @@
 
     const primaryRackId = prod?.rack || appState.selectedRack || appState.layout.racks[0]?.id || '';
     const storeRackId = prod?.rackStore || primaryRackId;
-    renderRackDetail(primaryRackId, { nivel: prod?.nivel || 0, slot: prod?.slot || 0, label: 'Ubicación' }, rackSvgPrimary);
-    renderRackDetail(storeRackId, { nivel: prod?.nivelStore || 0, slot: prod?.slotStore || 0, label: 'Almacén' }, rackSvgStore);
+    renderRackDetail(primaryRackId, { nivel: prod?.nivel || 0, slot: prod?.slot || 0, label: 'Ubicación', fullLabel: prod?.ubicacion || primaryRackId }, rackSvgPrimary);
+    renderRackDetail(storeRackId, { nivel: prod?.nivelStore || 0, slot: prod?.slotStore || 0, label: 'Almacén', fullLabel: prod?.almacen || storeRackId }, rackSvgStore);
     if($('#rackPrimaryChip')) $('#rackPrimaryChip').textContent = primaryRackId || '—';
     if($('#rackStoreChip')) $('#rackStoreChip').textContent = storeRackId || '—';
+    if($('#rackPrimaryLoc')) $('#rackPrimaryLoc').textContent = prod?.ubicacion || primaryRackId || '—';
+    if($('#rackStoreLoc')) $('#rackStoreLoc').textContent = prod?.almacen || storeRackId || '—';
     contentStatus.textContent = prod ? `Producto activo: ${prod.sku} • ${prod.rack}` : 'Sin producto activo';
     contentFootRight.textContent = prod ? `${prod.ubicacion || '—'} • ALM: ${prod.almacen || '—'}` : '—';
     detailStatus.textContent = prod ? `${primaryRackId} / ${storeRackId}` : (primaryRackId || '—');
@@ -947,14 +976,15 @@
     const holder = targetSvg || $('#rackView');
     if(!holder) return;
     holder.innerHTML = '';
+    holder.setAttribute('preserveAspectRatio', 'xMidYMid meet');
 
     const defs = svgEl('defs');
     const filter = svgEl('filter',{id:'slotGlow',x:'-60%',y:'-60%',width:'220%',height:'220%'});
     filter.appendChild(svgEl('feDropShadow',{dx:'0',dy:'0',stdDeviation:'10','flood-color':'#72ff3b','flood-opacity':'.8'}));
     defs.appendChild(filter); holder.appendChild(defs);
 
-    const root = svgEl('g',{transform:'translate(0 150)'}); holder.appendChild(root);
     const rackDims = { x:-68, y:-22, w:model.width || 150, d:model.depth || 82, h:model.height || 238, levels:model.levels || 4, slots:2 };
+    const root = svgEl('g',{transform:`translate(0 ${170 + Math.max(0, (250 - rackDims.h) * 0.12)})`}); holder.appendChild(root);
     const spacing = rackDims.h / rackDims.levels;
     const thickness = 3;
     const line = (a,b)=>svgEl('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,stroke:'#355a83','stroke-width':'4','stroke-linecap':'round'});
@@ -1000,7 +1030,7 @@
     contentSubtitle.textContent = 'Vista ortogonal editable: zonas, vértices y racks.';
     detailTitle.textContent = 'Inspector de layout';
     detailSubtitle.textContent = 'Propiedades de zona, rack y acciones rápidas.';
-    setTags(['ortogonal', 'mover zonas', 'agregar vértices', 'rotar racks']);
+    setTags(['ortogonal', 'mover zonas', 'agregar vértices', 'rotar racks', 'snap a grid']);
 
     contentWrap.innerHTML = `
       <div class="stage" style="display:grid;grid-template-rows:auto 1fr">
@@ -1077,7 +1107,7 @@
     $('#btnAddVertex').onclick = () => insertVertexOnSelectedEdge();
     $('#btnRotateRack').onclick = () => {
       const rack = findRackById(appState.selectedRackLayoutId); if(!rack) return;
-      rack.rot = (rack.rot + 90) % 360; renderLayoutEditor();
+      rack.rot = (rack.rot + 90) % 360; syncRackFootprint(rack, true); renderLayoutEditor();
     };
     $('#btnDeleteSelected').onclick = () => {
       const rid = appState.selectedRackLayoutId; const zid = appState.selectedZoneId;
@@ -1088,7 +1118,7 @@
   }
 
   function handleLayoutCanvasDown(e){
-    const svg = e.currentTarget; const p = svgPoint(e, svg);
+    const svg = e.currentTarget; const raw = svgPoint(e, svg); const p = { x:snapGrid(raw.x), y:snapGrid(raw.y) };
     if(appState.editor.mode === 'zone'){
       const id = nextZoneId();
       appState.layout.zones.push({ id, name:'Zona ' + id, color:'#9a7cff', pts:[{x:p.x-60,y:p.y-40},{x:p.x+60,y:p.y-40},{x:p.x+60,y:p.y+40},{x:p.x-60,y:p.y+40}] });
@@ -1097,7 +1127,8 @@
     if(appState.editor.mode === 'rack'){
       const zone = appState.layout.zones.find(z => pointInPoly(p, z.pts)) || findZoneById(appState.selectedZoneId) || appState.layout.zones[0];
       const id = nextRackId(zone.id);
-      appState.layout.racks.push({ id, zoneId:zone.id, x:p.x-24, y:p.y-44, w:48, h:90, rot:0, modelId:appState.selectedModelId });
+      const fp = getRackFootprint(appState.selectedModelId, 0);
+      appState.layout.racks.push({ id, zoneId:zone.id, x:snapGrid(p.x-fp.w/2), y:snapGrid(p.y-fp.h/2), w:fp.w, h:fp.h, rot:0, modelId:appState.selectedModelId });
       appState.selectedRackLayoutId = id; appState.editor.mode = 'select'; renderLayoutEditor(); return;
     }
     pickNearestEdge(p);
@@ -1154,17 +1185,17 @@
   function handleLayoutMove(e){
     const d = appState.editor.dragging; if(!d) return;
     const svg = $('#layoutSvg'); const p = svgPoint(e, svg);
-    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    const dx = snapGrid(p.x - d.start.x), dy = snapGrid(p.y - d.start.y);
     if(d.type === 'zone'){
       const zone = findZoneById(d.zoneId);
-      zone.pts = d.original.map(pt => ({ x: pt.x + dx, y: pt.y + dy }));
+      zone.pts = d.original.map(pt => ({ x: snapGrid(pt.x + dx), y: snapGrid(pt.y + dy) }));
       const racks = appState.layout.racks.filter(r => r.zoneId === d.zoneId);
-      racks.forEach((r, i) => { r.x = d.racks[i].x + dx; r.y = d.racks[i].y + dy; });
+      racks.forEach((r, i) => { r.x = snapGrid(d.racks[i].x + dx); r.y = snapGrid(d.racks[i].y + dy); });
       renderLayoutSvg(svg); renderLayoutInspector();
     } else if(d.type === 'vertex'){
-      const zone = findZoneById(d.zoneId); zone.pts[d.idx] = { x:p.x, y:p.y }; pickNearestEdge(p); renderLayoutSvg(svg); renderLayoutInspector();
+      const zone = findZoneById(d.zoneId); zone.pts[d.idx] = { x:snapGrid(p.x), y:snapGrid(p.y) }; pickNearestEdge({x:snapGrid(p.x),y:snapGrid(p.y)}); renderLayoutSvg(svg); renderLayoutInspector();
     } else if(d.type === 'rack'){
-      const rack = findRackById(d.rackId); rack.x = d.original.x + dx; rack.y = d.original.y + dy;
+      const rack = findRackById(d.rackId); rack.x = snapGrid(d.original.x + dx); rack.y = snapGrid(d.original.y + dy);
       const center = { x:rack.x + rack.w/2, y:rack.y + rack.h/2 };
       const host = appState.layout.zones.find(z => pointInPoly(center, z.pts)); if(host) rack.zoneId = host.id;
       renderLayoutSvg(svg); renderLayoutInspector();
@@ -1203,10 +1234,10 @@
       </div>` : ''}`;
     if($('#insZoneName')) $('#insZoneName').oninput = e => { zone.name = e.target.value; renderLayoutEditor(); };
     if($('#insZoneColor')) $('#insZoneColor').oninput = e => { zone.color = e.target.value; renderLayoutEditor(); };
-    if($('#insRackModel')) $('#insRackModel').onchange = e => { rack.modelId = e.target.value; renderLayoutInspector(); };
-    if($('#insRackX')) $('#insRackX').oninput = e => { rack.x = +e.target.value; renderLayoutEditor(); };
-    if($('#insRackY')) $('#insRackY').oninput = e => { rack.y = +e.target.value; renderLayoutEditor(); };
-    if($('#insRackRot')) $('#insRackRot').oninput = e => { rack.rot = (+e.target.value || 0) % 360; renderLayoutEditor(); };
+    if($('#insRackModel')) $('#insRackModel').onchange = e => { rack.modelId = e.target.value; syncRackFootprint(rack, true); renderLayoutEditor(); };
+    if($('#insRackX')) $('#insRackX').oninput = e => { rack.x = snapGrid(+e.target.value || 0); renderLayoutEditor(); };
+    if($('#insRackY')) $('#insRackY').oninput = e => { rack.y = snapGrid(+e.target.value || 0); renderLayoutEditor(); };
+    if($('#insRackRot')) $('#insRackRot').oninput = e => { rack.rot = ((+e.target.value || 0) % 360 + 360) % 360; syncRackFootprint(rack, true); renderLayoutEditor(); };
     contentStatus.textContent = zone ? `Editando ${zone.id}` : 'Selecciona zona o rack';
     contentFootRight.textContent = `${appState.layout.zones.length} zonas • ${appState.layout.racks.length} racks`;
     detailStatus.textContent = rack ? `${rack.id} • ${rack.zoneId}` : (zone ? zone.id : '—');
