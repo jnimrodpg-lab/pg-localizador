@@ -143,6 +143,10 @@
     .stage,.detail-stage{width:100%;height:100%;overflow:hidden;position:relative;border-radius:18px;border:1px solid var(--line);background:radial-gradient(circle at 50% 10%, rgba(54,163,255,.12), transparent 35%),linear-gradient(180deg, rgba(14,29,49,.98), rgba(8,17,30,.98))}
     svg{width:100%;height:100%;display:block}
     .content-foot,.detail-foot{padding:12px 14px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center;color:var(--muted);font-size:12px}
+    .dual-rack-wrap{display:grid;grid-template-rows:1fr 1fr;gap:10px;height:100%;min-height:0}
+    .dual-rack-card{display:grid;grid-template-rows:auto 1fr;min-height:0;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015))}
+    .dual-rack-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
+    .dual-rack-svg{min-height:0}
 
     /* MAP VIEW */
     .zone-floor{fill:rgba(255,255,255,.025);stroke:rgba(214,230,248,.18);stroke-width:2}
@@ -529,9 +533,11 @@
     return `${zoneId}-E${(Math.max(0,...vals)+1)}`;
   }
   function nextZoneId(){
-    let n = 4;
-    while(findZoneById('Z' + n)) n++;
-    return 'Z' + n;
+    const nums = appState.layout.zones
+      .map(z => { const m = String(z.id || '').match(/^Z(\d+)$/i); return m ? parseInt(m[1], 10) : 0; })
+      .filter(Boolean);
+    const next = Math.max(2, ...nums) + 1;
+    return 'Z' + next;
   }
 
   async function loadSheetFromConfig(){
@@ -733,6 +739,8 @@
           zona: main.zona,
           nivel: main.nivel,
           slot: main.slot,
+          nivelStore: store.nivel,
+          slotStore: store.slot,
           _rowIndex: headerRowIndex + 1 + dataIndex
         };
       }).filter(x => x.sku || x.nombre || x.barras);
@@ -831,14 +839,37 @@
     const prod = appState.selectedProduct;
     contentTitle.textContent = appState.screen === 'reports' ? 'Reporte visual de ubicación' : 'Plano general 3D isométrico';
     contentSubtitle.textContent = appState.screen === 'products' ? 'Mapa navegable con foco en el producto activo.' : 'Navega con zoom y pan. El producto encontrado resalta zona y rack.';
-    detailTitle.textContent = 'Rack seleccionado';
-    detailSubtitle.textContent = 'Vista isométrica 3D del rack con contenido y celda activa.';
+    detailTitle.textContent = 'Racks de ubicación y almacén';
+    detailSubtitle.textContent = 'Se muestran dos racks en horizontal: ubicación principal y rack de almacén.';
     setTags(['isométrico', 'pan + zoom', 'resaltado', 'racks realistas']);
 
     contentWrap.innerHTML = `<div class="stage"><svg id="isoMap" viewBox="-560 -160 1220 820"></svg></div>`;
-    detailWrap.innerHTML = `<div class="detail-stage"><svg id="rackView" viewBox="-230 -310 470 520"></svg></div>`;
+    detailWrap.innerHTML = `
+      <div class="dual-rack-wrap">
+        <div class="dual-rack-card">
+          <div class="dual-rack-head">
+            <div>
+              <b>Rack de ubicación</b>
+              <div class="muted tiny">Ubicación principal del producto</div>
+            </div>
+            <span class="chip" id="rackPrimaryChip">—</span>
+          </div>
+          <div class="detail-stage dual-rack-svg"><svg id="rackViewPrimary" viewBox="-230 -310 470 520"></svg></div>
+        </div>
+        <div class="dual-rack-card">
+          <div class="dual-rack-head">
+            <div>
+              <b>Rack de almacén</b>
+              <div class="muted tiny">Ubicación de respaldo / almacén</div>
+            </div>
+            <span class="chip" id="rackStoreChip">—</span>
+          </div>
+          <div class="detail-stage dual-rack-svg"><svg id="rackViewStore" viewBox="-230 -310 470 520"></svg></div>
+        </div>
+      </div>`;
     const svg = $('#isoMap');
-    const rackSvg = $('#rackView');
+    const rackSvgPrimary = $('#rackViewPrimary');
+    const rackSvgStore = $('#rackViewStore');
 
     const defs = svgEl('defs');
     const glow = svgEl('filter',{id:'mapGlow',x:'-40%',y:'-40%',width:'180%',height:'180%'});
@@ -862,11 +893,16 @@
     racks.forEach(r => root.appendChild(buildIsoRack(r, prod)));
     enablePanZoom(svg, root);
 
-    renderRackDetail(appState.selectedRack || prod?.rack, prod, rackSvg);
+    const primaryRackId = prod?.rack || appState.selectedRack || appState.layout.racks[0]?.id || '';
+    const storeRackId = prod?.rackStore || primaryRackId;
+    renderRackDetail(primaryRackId, { nivel: prod?.nivel || 0, slot: prod?.slot || 0, label: 'Ubicación' }, rackSvgPrimary);
+    renderRackDetail(storeRackId, { nivel: prod?.nivelStore || 0, slot: prod?.slotStore || 0, label: 'Almacén' }, rackSvgStore);
+    if($('#rackPrimaryChip')) $('#rackPrimaryChip').textContent = primaryRackId || '—';
+    if($('#rackStoreChip')) $('#rackStoreChip').textContent = storeRackId || '—';
     contentStatus.textContent = prod ? `Producto activo: ${prod.sku} • ${prod.rack}` : 'Sin producto activo';
-    contentFootRight.textContent = prod ? prod.ubicacion : '—';
-    detailStatus.textContent = appState.selectedRack || prod?.rack || '—';
-    detailChip.textContent = prod ? `N${prod.nivel} • S${prod.slot}` : '—';
+    contentFootRight.textContent = prod ? `${prod.ubicacion || '—'} • ALM: ${prod.almacen || '—'}` : '—';
+    detailStatus.textContent = prod ? `${primaryRackId} / ${storeRackId}` : (primaryRackId || '—');
+    detailChip.textContent = prod ? `U: N${prod.nivel||0} S${prod.slot||0} • A: N${prod.nivelStore||0} S${prod.slotStore||0}` : '—';
   }
 
   function buildIsoRack(r, prod){
@@ -1055,7 +1091,7 @@
     const svg = e.currentTarget; const p = svgPoint(e, svg);
     if(appState.editor.mode === 'zone'){
       const id = nextZoneId();
-      appState.layout.zones.push({ id, name:'Nueva ' + id, color:'#9a7cff', pts:[{x:p.x-60,y:p.y-40},{x:p.x+60,y:p.y-40},{x:p.x+60,y:p.y+40},{x:p.x-60,y:p.y+40}] });
+      appState.layout.zones.push({ id, name:'Zona ' + id, color:'#9a7cff', pts:[{x:p.x-60,y:p.y-40},{x:p.x+60,y:p.y-40},{x:p.x+60,y:p.y+40},{x:p.x-60,y:p.y+40}] });
       appState.selectedZoneId = id; appState.editor.mode = 'select'; renderLayoutEditor(); return;
     }
     if(appState.editor.mode === 'rack'){
@@ -1340,4 +1376,3 @@
 </script>
 </body>
 </html>
-
