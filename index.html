@@ -204,6 +204,12 @@
 
     @media (max-width: 1460px){.app{grid-template-columns:var(--sidebar-w) 360px 1fr 320px}}
     @media (max-width: 1280px){body{overflow:auto}.app,.app.sidebar-collapsed{height:auto;min-height:100vh;grid-template-columns:1fr;grid-template-rows:auto auto minmax(480px,60vh) minmax(320px,48vh)}.app.sidebar-collapsed .brand-text,.app.sidebar-collapsed .menu-title span,.app.sidebar-collapsed .menu-item span,.app.sidebar-collapsed .sidebar-foot,.app.sidebar-collapsed .menu-items{display:initial}.app.sidebar-collapsed .menu-title,.app.sidebar-collapsed .menu-item{justify-content:flex-start;padding-inline:12px}}
+
+    .ortho-dim{stroke:rgba(255,216,77,.55);stroke-width:1.6;stroke-dasharray:6 4}
+    .ortho-dim-text{fill:#ffe17f;font-size:11px;font-weight:800;font-family:var(--mono)}
+    .edge-hit{stroke:rgba(255,255,255,0);stroke-width:18;cursor:move}
+    .edge-guide{stroke:rgba(255,216,77,.9);stroke-width:3.2;stroke-dasharray:8 5}
+
   </style>
 </head>
 <body>
@@ -762,6 +768,7 @@
           rack: main.rack,
           rackStore: store.rack,
           zona: main.zona,
+          zonaStore: store.zona,
           nivel: main.nivel,
           slot: main.slot,
           nivelStore: store.nivel,
@@ -860,6 +867,47 @@
     detailChip.textContent = appState.sheetConfig.lastMode;
   }
 
+
+  function orthoToIsoBounds(points){
+    const isoPts = points.map(p => toIso(p.x, p.y, 0));
+    return {
+      minX: Math.min(...isoPts.map(p => p.x)),
+      maxX: Math.max(...isoPts.map(p => p.x)),
+      minY: Math.min(...isoPts.map(p => p.y)),
+      maxY: Math.max(...isoPts.map(p => p.y))
+    };
+  }
+
+  function mergeBounds(boundsList){
+    const valid = boundsList.filter(Boolean);
+    if(!valid.length) return null;
+    return {
+      minX: Math.min(...valid.map(b => b.minX)),
+      maxX: Math.max(...valid.map(b => b.maxX)),
+      minY: Math.min(...valid.map(b => b.minY)),
+      maxY: Math.max(...valid.map(b => b.maxY))
+    };
+  }
+
+  function focusBoundsForProduct(prod){
+    if(!prod) return null;
+    const zoneIds = [...new Set([prod.zona, prod.zonaStore].filter(Boolean))];
+    const rackIds = [...new Set([prod.rack, prod.rackStore].filter(Boolean))];
+    const zoneBounds = zoneIds.map(id => {
+      const z = findZoneById(id);
+      return z ? orthoToIsoBounds(z.pts) : null;
+    });
+    const rackBounds = rackIds.map(id => {
+      const r = findRackById(id);
+      if(!r) return null;
+      const pts = [
+        {x:r.x, y:r.y}, {x:r.x+r.w, y:r.y}, {x:r.x+r.w, y:r.y+r.h}, {x:r.x, y:r.y+r.h}
+      ];
+      return orthoToIsoBounds(pts);
+    });
+    return mergeBounds([...zoneBounds, ...rackBounds]);
+  }
+
   function renderMapView(){
     const prod = appState.selectedProduct;
     contentTitle.textContent = appState.screen === 'reports' ? 'Reporte visual de ubicación' : 'Plano general 3D isométrico';
@@ -909,7 +957,9 @@
 
     appState.layout.zones.forEach(z => {
       const pts = z.pts.map(p => toIso(p.x, p.y, 0));
-      const cls = 'zone-floor' + (prod?.zona === z.id ? ' active' : '') + ((prod?.almacen.startsWith('ALM1') && z.id === 'ALM1') ? ' storage' : '');
+      const isMainZone = prod?.zona === z.id;
+      const isStoreZone = prod?.zonaStore === z.id;
+      const cls = 'zone-floor' + (isMainZone ? ' active' : '') + (isStoreZone ? ' storage' : '');
       const path = svgEl('path',{d:`M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y} L ${pts[2].x} ${pts[2].y} L ${pts[3].x} ${pts[3].y} Z`,class:cls});
       root.appendChild(path);
       const c = centroid(z.pts); const ci = toIso(c.x,c.y,0);
@@ -918,7 +968,7 @@
 
     const racks = appState.layout.racks.slice().sort((a,b)=>(a.x+a.y)-(b.x+b.y));
     racks.forEach(r => root.appendChild(buildIsoRack(r, prod)));
-    enablePanZoom(svg, root);
+    enablePanZoom(svg, root, focusBoundsForProduct(prod));
 
     const primaryRackId = prod?.rack || appState.selectedRack || appState.layout.racks[0]?.id || '';
     const storeRackId = prod?.rackStore || primaryRackId;
@@ -1016,9 +1066,23 @@
     detailChip.textContent = `${model.levels} niveles`;
   }
 
-  function enablePanZoom(svg, target){
+  function enablePanZoom(svg, target, focusBounds = null){
     let scale = 1, tx = 20, ty = 170, dragging = false, sx = 0, sy = 0;
-    const apply = () => target.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`); apply();
+    const apply = () => target.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`);
+
+    if(focusBounds){
+      const vw = 1220, vh = 820;
+      const bw = Math.max(120, focusBounds.maxX - focusBounds.minX);
+      const bh = Math.max(120, focusBounds.maxY - focusBounds.minY);
+      const pad = 120;
+      scale = Math.max(.72, Math.min(1.55, Math.min((vw - pad) / bw, (vh - pad) / bh)));
+      const cx = (focusBounds.minX + focusBounds.maxX) / 2;
+      const cy = (focusBounds.minY + focusBounds.maxY) / 2;
+      tx = (vw / 2) - (cx * scale);
+      ty = (vh / 2) - (cy * scale);
+    }
+
+    apply();
     svg.onwheel = e => { e.preventDefault(); scale = Math.max(.65, Math.min(2.3, scale + (e.deltaY > 0 ? -0.08 : 0.08))); apply(); };
     svg.onpointerdown = e => { if(e.target.closest('.rack-iso')) return; dragging = true; sx = e.clientX - tx; sy = e.clientY - ty; svg.setPointerCapture(e.pointerId); };
     svg.onpointermove = e => { if(!dragging) return; tx = e.clientX - sx; ty = e.clientY - sy; apply(); };
@@ -1030,7 +1094,7 @@
     contentSubtitle.textContent = 'Vista ortogonal editable: zonas, vértices y racks.';
     detailTitle.textContent = 'Inspector de layout';
     detailSubtitle.textContent = 'Propiedades de zona, rack y acciones rápidas.';
-    setTags(['ortogonal', 'mover zonas', 'agregar vértices', 'rotar racks', 'snap a grid']);
+    setTags(['ortogonal', 'mover zonas', 'agregar vértices', 'mover aristas', 'snap a grid', 'cotas']);
 
     contentWrap.innerHTML = `
       <div class="stage" style="display:grid;grid-template-rows:auto 1fr">
@@ -1079,9 +1143,25 @@
           v.addEventListener('pointerdown', e => startVertexDrag(e, zone.id, idx));
           vertexLayer.appendChild(v);
         });
+        zone.pts.forEach((p, idx) => {
+          const q = zone.pts[(idx+1)%zone.pts.length];
+          const hit = svgEl('line',{x1:p.x,y1:p.y,x2:q.x,y2:q.y,class:'edge-hit'});
+          hit.addEventListener('pointerdown', e => startEdgeDrag(e, zone.id, idx, (idx+1)%zone.pts.length));
+          edgeLayer.appendChild(hit);
+
+          const mx = (p.x + q.x)/2, my = (p.y + q.y)/2;
+          const len = Math.hypot(q.x-p.x, q.y-p.y);
+          const nx = (q.y-p.y) / (len || 1);
+          const ny = -(q.x-p.x) / (len || 1);
+          const ox = nx * 16, oy = ny * 16;
+          edgeLayer.appendChild(svgEl('line',{x1:p.x,y1:p.y,x2:q.x,y2:q.y,class: (appState.selectedEdge.zoneId===zone.id && appState.selectedEdge.a===idx) ? 'edge-guide' : 'ortho-dim'}));
+          const txt = svgEl('text',{x:mx+ox,y:my+oy,class:'ortho-dim-text','text-anchor':'middle'});
+          txt.textContent = `${Math.round(len)}`;
+          edgeLayer.appendChild(txt);
+        });
         if(appState.selectedEdge.zoneId===zone.id && appState.selectedEdge.a>=0){
           const a = zone.pts[appState.selectedEdge.a], b = zone.pts[appState.selectedEdge.b];
-          edgeLayer.appendChild(svgEl('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,class:'edge-highlight'}));
+          edgeLayer.appendChild(svgEl('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,class:'edge-guide'}));
         }
       }
     });
@@ -1172,6 +1252,17 @@
     appState.editor.dragging = { type:'vertex', zoneId, idx, start:p, original: clone(findZoneById(zoneId).pts[idx]) };
     renderLayoutInspector(); renderLayoutEditor();
   }
+  function startEdgeDrag(e, zoneId, a, b){
+    if(appState.editor.mode !== 'select') return;
+    e.stopPropagation();
+    const svg = $('#layoutSvg'); const p = svgPoint(e, svg);
+    const zone = findZoneById(zoneId);
+    appState.selectedZoneId = zoneId;
+    appState.selectedEdge = { zoneId, a, b };
+    appState.selectedRackLayoutId = '';
+    appState.editor.dragging = { type:'edge', zoneId, a, b, start:p, originalA: clone(zone.pts[a]), originalB: clone(zone.pts[b]) };
+    renderLayoutInspector(); renderLayoutEditor();
+  }
   function startRackDrag(e, rackId){
     if(appState.editor.mode !== 'select') return;
     e.stopPropagation();
@@ -1194,6 +1285,19 @@
       renderLayoutSvg(svg); renderLayoutInspector();
     } else if(d.type === 'vertex'){
       const zone = findZoneById(d.zoneId); zone.pts[d.idx] = { x:snapGrid(p.x), y:snapGrid(p.y) }; pickNearestEdge({x:snapGrid(p.x),y:snapGrid(p.y)}); renderLayoutSvg(svg); renderLayoutInspector();
+    } else if(d.type === 'edge'){
+      const zone = findZoneById(d.zoneId);
+      const a0 = d.originalA, b0 = d.originalB;
+      const horizontal = Math.abs(a0.y - b0.y) <= Math.abs(a0.x - b0.x);
+      if(horizontal){
+        const ny = snapGrid(a0.y + dy);
+        zone.pts[d.a].y = ny; zone.pts[d.b].y = ny;
+      } else {
+        const nx = snapGrid(a0.x + dx);
+        zone.pts[d.a].x = nx; zone.pts[d.b].x = nx;
+      }
+      appState.selectedEdge = { zoneId:d.zoneId, a:d.a, b:d.b };
+      renderLayoutSvg(svg); renderLayoutInspector();
     } else if(d.type === 'rack'){
       const rack = findRackById(d.rackId); rack.x = snapGrid(d.original.x + dx); rack.y = snapGrid(d.original.y + dy);
       const center = { x:rack.x + rack.w/2, y:rack.y + rack.h/2 };
@@ -1212,6 +1316,7 @@
         <div class="kv-row"><b>Zona seleccionada</b><span>${zone ? zone.id : '—'}</span></div>
         <div class="kv-row"><b>Rack seleccionado</b><span>${rack ? rack.id : '—'}</span></div>
         <div class="kv-row"><b>Modo</b><span>${appState.editor.mode}</span></div>
+        <div class="kv-row"><b>Snap grid</b><span>40 px</span></div>
       </div>
       <div style="height:12px"></div>
       ${zone ? `<div class="grid">
